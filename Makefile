@@ -3,11 +3,11 @@ SHELL=/bin/bash
 TESTS=${wildcard tests/*.scm}
 
 
-.PHONY: cps matrices test racket clean
+.PHONY: anf matrices test racket clean
 
 default: matrices
 
-cps: $(TESTS:.scm=.cps) 
+anf: $(TESTS:.scm=.anf) 
 
 matrices: $(TESTS:.scm=.mat)
 
@@ -15,17 +15,17 @@ racket: $(TESTS:.scm=.rkt)
 
 
 
-tests/%.cps: tests/%.scm
+tests/%.anf: tests/%.scm
 	$(RACKET) desugar.rkt < $< > $@
 
-tests/%.mat: tests/%.cps
+tests/%.mat: tests/%.anf
 	$(RACKET) write-matrices.rkt < $< > $@
 
-tests/%.rkt: tests/%.cps
-	cp cps-header.rkt $@
+tests/%.rkt: tests/%.anf
+	cp anf-header.rkt $@
 	cat $< >> $@
 
 
 clean:
-	rm -f tests/*.{cps,mat,rkt}
+	rm -f tests/*.{anf,mat,rkt}
 

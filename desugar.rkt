@@ -317,7 +317,7 @@
 ;(display (simplify (collapse-defines (read))))
 (pretty-write
   ;(alpha-rename
-    (cps-convert
+    ;(cps-convert
       (anf-convert
         (simplify
           (collapse-defines
@@ -325,7 +325,7 @@
           )
         )
       )
-    )
+    ;)
   ;)
 )
 (newline)

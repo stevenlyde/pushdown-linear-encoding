@@ -9,28 +9,25 @@
 (define program (parse (read)))
 (define exps (flatten/exp program))
 
-
-#|
-
-S: States. The control expression of an abstract machine, since we are doing a monovariant analysis.
-
-L: lamdas in the program
-
-V: L I SY B
-
-A: X and V
-
-|#
-
-
 ;;; Domains
 
+; S: States
+; L: Lambdas
+; I: Numbers 
+; Y: Symbols
+; B: Booleans and Types
+; V: Values (L I Y B)
+; A: Addresses (X V)
+
 (define (state? e) 
-  (or (call-exp? e)
+  (or (constant-exp? e)
+      (ref-exp? e)
+      (lambda-exp? e)
+      (let-exp? e)
       (prim-exp? e)
+      (call-exp? e)
       (if-exp? e)
-      (set!/k-exp? e)
-      (halt-exp? e)))
+      (set!-exp? e)))
 
 ; States
 (define S
@@ -80,23 +77,28 @@ A: X and V
     [(constant-exp _ `(quote . ,_)) #t]
     [else #f]))
 
+; Symbols
 (define Y
   (set->list (for/fold ([Y (set)])
                ([e exps]
                 #:when (quote-exp? e))
                (set-add Y (exp-label e)))))
 
+; Boooleans and Types
 (define B '(SYM LIST VOID TRUE FALSE INT))
 
+; Values
 (define V (append L I Y B))
+
+; Addresses
 (define A (append X V))
 
 
 (define arg-size
-  (for/fold ([arg-size 2])
+  (for/fold ([arg-size 3])
             ([e exps])
     (match e
-      [(prim-exp _ op args k)
+      [(prim-exp _ op args)
        (max (length args) arg-size)]
       [(call-exp _ _ args)
        (max (length args) arg-size)]
@@ -110,14 +112,6 @@ A: X and V
             (primlistop? (prim-exp-op e)))
        (max prim-list-max (length (prim-exp-args e)))]
       [else prim-list-max])))
-
-
-#|
-
-r: S x 1
-sigma: 
-
-|#
 
 
 (define (list-index lst v)
@@ -150,8 +144,8 @@ sigma:
 
 (define-lookup exp->state
   (for/fold ([h (hash)])
-    ([s S]
-     [n (in-naturals)])
+            ([s S]
+             [n (in-naturals)])
     (hash-set h s n)))
 
 (define-lookup label->exp
@@ -182,10 +176,6 @@ sigma:
 (for ([e S]
       [n (in-naturals)])
   (match e
-    [(set!/k-exp _ _ _ k)
-     (printf "~a ~a~n" n (exp->addr k))]
-    [(prim-exp _ _ _ k)
-     (printf "~a ~a~n" n (exp->addr k))]
     [(call-exp _ fun _)
      (printf "~a ~a~n" n (exp->addr fun))]
     [else (void)]))
@@ -226,12 +216,16 @@ sigma:
   (for ([s S]
         [n (in-naturals)])
     (match s
-      [(set!/k-exp _ id val-exp _)
+      [(let-exp _ id val-exp body)
+       (cond
+         [(= i 1) (printf "~a ~a~n" n (exp->addr id))]
+         [else (void)])]
+      [(set!-exp _ id val-exp)
        (cond
          [(= i 1) (printf "~a ~a~n" n (exp->addr id))]
          [(= i 2) (printf "~a ~a~n" n (exp->addr val-exp))]
          [else    (void)])]
-      [(prim-exp _ op args _)
+      [(prim-exp _ op args)
        (when (and (primlistop? op) (<= i (length args)))
          (printf "~a ~a~n" n (exp->addr (list-ref args (- i 1)))))]
       [(if-exp _ test _ _)
@@ -280,7 +274,7 @@ sigma:
 (printf "Set ~a 1~n" (length S))
 (for ([s S]
       [n (in-naturals)])
-  (when (set!/k-exp? s)
+  (when (set!-exp? s)
      (printf "~a 0~n" n)))
 (newline)
 
@@ -318,4 +312,34 @@ sigma:
                (= i (length (prim-exp-args s))))
        (printf "~a 0~n" n)))
   (newline))
+
+
+
+(printf "LetVal ~a ~a~n" (length S) (length S))
+(for ([s S])
+  (match s
+    [(let-exp _ _ val _)
+     (printf "~a ~a~n" (exp->state s) (exp->state val))]
+    [else (void)]))
+(newline)
+
+
+(printf "LetBody ~a ~a~n" (length S) (length S))
+(for ([s S])
+  (match s
+    [(let-exp _ _ _ body)
+     (printf "~a ~a~n" (exp->state s) (exp->state body))]
+    [else (void)]))
+(newline)
+
+
+(printf "Push ~a ~a~n~n" (length S) (length S))
+(printf "Pop ~a ~a~n~n" (length S) (length S))
+(printf "Empty ~a ~a~n~n" (length S) (length S))
+
+
+(printf "epsilon ~a ~a~n" (length S) (length S))
+(for ([s S]
+      [n (in-naturals)])
+  (printf "~a ~a~n" n n))
 
