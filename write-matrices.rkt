@@ -1,615 +1,321 @@
 #lang racket
 
+(require "forms.rkt"
+         "prims.rkt")
 
-;; Read the desugared source tree and flatten it, assigning a number to each language form
+(define (flatten/exp e)
+  (reverse (fold/exp cons empty e)))
 
-(define label 0)
-(define saved (make-hash))
-
-(define (save! e)
-        (define l label)
-        (set! label (+ label 1))
-        (hash-set! saved l e)
-        l)
-
-(define (process-input e)
-        (match e
-               [`(quote ,s) (save! e)]
-               [`(prim ,op ,ae* ...)
-                (save! `(prim ,op . ,(map process-input ae*)))]
-               [`(halt)
-                (save! `(halt))]
-               [`(set!/k ,x ,aev ,aek)
-                (save! `(set!/k ,(process-input x) ,(process-input aev) ,(process-input aek)))]
-               [`(if ,ae ,et ,ef)
-                (save! `(if ,(process-input ae) ,(process-input et) ,(process-input ef)))]
-               [`(lambda ,args ,eb)
-                (save! `(lambda ,(map process-input args) ,(process-input eb)))]
-               [`(,ae* ...)
-                (save! (map process-input ae*))]
-               [else (save! e)]))
-
-(define (pretty-program [l root])
-        (define e (hash-ref saved l))
-        (match e
-               [`(quote ,s) `(label ,l ,e)]
-               [`(halt)
-                `(label ,l `(halt))]
-               [`(prim ,op ,ae* ...)
-                `(label ,l (prim ,op . ,(map pretty-program ae*)))]
-               [`(set!/k ,x ,aev ,aek)
-                `(label ,l (set!/k ,(pretty-program x) ,(pretty-program aev) ,(pretty-program aek)))]
-               [`(if ,ae ,et ,ef)
-                `(label ,l (if ,(pretty-program ae) ,(pretty-program et) ,(pretty-program ef)))]
-               [`(lambda ,args ,eb)
-                `(label ,l (lambda ,(map pretty-program args) ,(pretty-program eb)))]
-               [(? list?)
-                `(label ,l ,(map pretty-program e))]
-               [else `(label ,l ,e)]))
+(define program (parse (read)))
+(define exps (flatten/exp program))
 
 
-(define root (process-input (read)))
+#|
+
+S: States. The control expression of an abstract machine, since we are doing a monovariant analysis.
+
+L: lamdas in the program
+
+V: L I SY B
+
+A: X and V
+
+|#
 
 
+;;; Domains
 
-;; Utility for iterating over the program
-(define (iter callback! [l root])
-        (define e (hash-ref saved l))
-        (callback! l e)
-        (match e
-               [`(quote ,s) (void)]
-               [`(halt) (void)]
-               [`(prim ,op ,ae* ...)
-                 (map (lambda (l) (iter callback! l)) ae*)]
-               [`(set!/k ,x ,aev ,aek)
-                 (iter callback! x)
-                 (iter callback! aev)
-                 (iter callback! aek)]
-               [`(if ,ae ,et ,ef)
-                 (iter callback! ae)
-                 (iter callback! et)
-                 (iter callback! ef)]
-               [`(lambda ,args ,eb)
-                 (iter callback! eb)
-                 (map (lambda (l) (iter callback! l)) args)]
-               [(? list?)
-                (map (lambda (l) (iter callback! l)) e)]
-               [else (void)])
-        (void))
+(define (state? e) 
+  (or (call-exp? e)
+      (prim-exp? e)
+      (if-exp? e)
+      (set!/k-exp? e)
+      (halt-exp? e)))
+
+; States
+(define S
+  (for/fold ([S empty])
+    ([e exps]
+     #:when (state? e))
+    (cons e S)))
+
+; Lambdas
+(define L
+  (set->list (for/fold ([S (set)])
+               ([e exps]
+                #:when (lambda-exp? e))
+               (set-add S (exp-label e)))))
 
 
-; Valid PrimList opsA
-(define primlistops '(list append cons cdr car reverse memq member vector-ref make-vector))
+(define (variable e)
+  (match e
+    [(? ref-exp? e) (ref-exp-id e)]
+    [(? param-exp? e) (param-exp-id e)]
+    [else #f]))
+
+; Variables
+(define X
+  (for/fold ([X empty])
+    ([e exps]
+     #:when (variable e))
+    (let ([id (variable e)])
+      (if (not (member id X))
+          (cons id X)
+          X))))
+
+(define (number-exp? e)
+  (and (constant-exp? e)
+       (number? (constant-exp-val e))))
 
 
-; ARGSN
-(define ARGSN 2)
-(define (build-ARGSN! l e)
-        ; e is a primlist
-        (when (and (list? e) (equal? (first e) 'prim) (member (second e) primlistops))
-              (set! ARGSN (max ARGSN (- (length e) 3))))
-        ; e is a callsite
-        (when (and (not (or (not (list? e))
-                            (member (first e) '(prim set!/k if lambda halt))))
-                   (> (- (length e) 1) 0))
-              (set! ARGSN (max ARGSN (- (length e) 1)))))
-(iter build-ARGSN!)
+; Integers
+(define I
+  (set->list (for/fold ([I (set)])
+               ([e exps]
+                #:when (number-exp? e))
+               (set-add I (exp-label e)))))
 
+(define (quote-exp? e)
+  (match e
+    [(constant-exp _ `(quote . ,_)) #t]
+    [else #f]))
 
-; primlistmax
-(define primlistmax 0)
-(define (build-primlistmax! l e)
-        (when (and (list? e) (equal? (first e) 'prim) (member (second e) primlistops))
-              ; e is a primlist
-              (when (> (- (length e) 3) 0)
-                    (set! primlistmax (max primlistmax (- (length e) 3))))))
-(iter build-primlistmax!)
-
-
-;; Build S
-
-(define S '())
-(define (build-S! l e)
-        (when (and (list? e) (not (member (first e) '(lambda quote))))
-              (set! S (cons l S))))
-(iter build-S!)
-
-
-;; Build X
-
-(define X '())
-(define (build-X! l e)
-        (when (and (symbol? e) (not (equal? e 'halt)))
-              (when (not (member e X))
-                    (set! X (cons e X)))))
-(iter build-X!)
-
-
-;; Build LAM and FREE and V
-
-(define LAM (set))
-(define (build-LAM! l e)
-        (when (and (list? e) (equal? (first e) 'lambda))
-              ; e is a lambda-abstraction
-              (set! LAM (set-add LAM l))))
-(iter build-LAM!)
-(define L (set->list LAM))
-
-
-(define INTLOCS (set))
-(define (build-INTLOCS! l e)
-        (when (number? e)
-              ; e is a literal
-              (set! INTLOCS (set-add INTLOCS l))))
-(iter build-INTLOCS!)
-(define I (set->list INTLOCS))
-
-(define SYMLOCS (set))
-(define (build-SYMLOCS! l e)
-        (when (and (list? e) (equal? (first e) 'quote))
-              ; e is a literal
-              (set! SYMLOCS (set-add SYMLOCS l))))
-(iter build-SYMLOCS!)
-(define SY (set->list SYMLOCS))
+(define Y
+  (set->list (for/fold ([Y (set)])
+               ([e exps]
+                #:when (quote-exp? e))
+               (set-add Y (exp-label e)))))
 
 (define B '(SYM LIST VOID TRUE FALSE INT))
-(define V (append L I SY B))
+
+(define V (append L I Y B))
 (define A (append X V))
 
 
-(define allprims (set))
-(define (build-allprims! l e)
-        (when (and (list? e) (equal? (first e) 'prim))
-              (set! allprims (set-add allprims (second e)))))
-(iter build-allprims!)
+(define arg-size
+  (for/fold ([arg-size 2])
+            ([e exps])
+    (match e
+      [(prim-exp _ op args k)
+       (max (length args) arg-size)]
+      [(call-exp _ _ args)
+       (max (length args) arg-size)]
+      [else arg-size])))
+
+(define prim-list-max
+  (for/fold ([prim-list-max 0])
+            ([e exps])
+    (cond
+      [(and (prim-exp? e) 
+            (primlistop? (prim-exp-op e)))
+       (max prim-list-max (length (prim-exp-args e)))]
+      [else prim-list-max])))
 
 
-; lengths
-(define lenV (length V)) 
-(define lenI (length I)) 
-(define lenSY (length SY)) 
-(define lenL (length L)) 
-(define lenA (length A)) 
-(define lenS (length S)) 
-(define lenX (length X)) 
+#|
+
+r: S x 1
+sigma: 
+
+|#
 
 
+(define (list-index lst v)
+  (for/or ([w lst] [i (in-naturals)] #:when (equal? v w)) i))
 
-;;;;;;; DEBUG
-;(pretty-print (pretty-program))
-;(pretty-print C)
-;(pretty-print S)
-;(pretty-print A)
-;(pretty-print X*T)
-;(pretty-print CLO)
-;(pretty-print X)
-;(pretty-print T)
-;(pretty-print (hash-ref saved 8706))
-;(pretty-print root)
+(define-syntax-rule (define-lookup id hash)
+  (define id
+    (let ([h hash])
+      (lambda (k) (hash-ref h k)))))
 
+(define-lookup exp->addr
+  (for/fold ([h (hash)])
+    ([e exps])
+    (cond
+      [(or (lambda-exp? e)
+           (number-exp? e)
+           (quote-exp? e))
+       (hash-set h e (list-index A (exp-label e)))]
+      [(and (constant-exp? e)
+            (eq? #t (constant-exp-val e)))
+       (hash-set h e (- (length A) 3))]
+      [(and (constant-exp? e)
+            (eq? #f (constant-exp-val e)))
+       (hash-set h e (- (length A) 2))]
+      [(ref-exp? e)
+       (hash-set h e (list-index A (ref-exp-id e)))]
+      [(param-exp? e)
+       (hash-set h e (list-index A (param-exp-id e)))]
+      [else h])))
 
-; print out all prims
-;(pretty-print allprims)
+(define-lookup exp->state
+  (for/fold ([h (hash)])
+    ([s S]
+     [n (in-naturals)])
+    (hash-set h s n)))
 
-;(pretty-print saved)
-;(pretty-print (list-ref V 96))
+(define-lookup label->exp
+  (for/fold ([h (hash)])
+            ([e exps])
+    (hash-set h (exp-label e) e)))
 
-
-
-;; Table building Utils
-(define (find-clo l)
-        (define (find-clo-rem rem n)
-                (if (null? rem)
-                    (error `(NO-SUCH-CLOSURE ,l))
-                    (if (equal? l (car rem))
-                        n
-                        (find-clo-rem (cdr rem) (+ n 1)))))
-        (find-clo-rem L 0))
-
-(define (find-state l)
-        (define (find-state-rem rem n)
-                (if (null? rem)
-                    (error `(NO-SUCH-STATE ,l))
-                    (if (equal? l (car rem))
-                        n
-                        (find-state-rem (cdr rem) (+ n 1)))))
-        (find-state-rem S 0))
-
-(define (ae->A ael)
-        (define ae (hash-ref saved ael))
-        (cond [(symbol? ae)
-               (- lenX (length (member ae X)))]
-              [(number? ae) (+ lenX lenL (- lenI (length (member ael I))))]
-              [(equal? ae #t) (- lenA 3)]  ;;;;;;;;;;; this needs to change as B changes 
-              [(equal? ae #f) (- lenA 2)]  ;;;;;;;;;;; this needs to change as B changes 
-              [(and (list? ae) (equal? (first ae) 'quote)) (+ lenX lenL lenI (- lenSY (length (member ael SY))))]
-              [(and (list? ae) (equal? (first ae) 'lambda))
-               (define clooff (find-clo ael))
-               (+ lenX clooff)]))
-
-(define (forupto f! i)
-        (if (= i 0)
-            (void)
-            (begin (f! i)
-                   (forupto f! (- i 1)))))
+(define labeled-value? number?)
 
 
+;;; Matrices
 
-;; Write the output file matrices.txt
-(define out (open-output-file "matrices.txt" #:mode 'text #:exists 'replace))
-
-;; Write table r
-(display "r " out)
-(display lenS out)
-(display " 1" out)
-(newline out)
-(define (display-r cS remS)
-        (when (not (null? remS))
-              (define l (car remS))
-              (define e (hash-ref saved l))
-              (when (equal? root l)
-                    (display cS out)
-                    (display " 0" out)
-                    (newline out))
-              (display-r (+ 1 cS) (cdr remS))))
-(display-r 0 S)
-(newline out)
-(pretty-print 13)
+(printf "r ~a 1~n" (length S))
+(for ([n (in-naturals)]
+      [e S]
+      #:when (eq? program e))
+  (printf "~a 0~n" n))
+(newline)
 
 
-;; Write table sigma
-(display "sigma " out)
-(display lenA out)
-(display " " out)
-(display lenV out)
-(newline out)
-(define (display-sigma [n 0])
-        (if (< n lenV)
-            (begin (display (+ n lenX) out)
-                   (display " " out)
-                   (display n out)
-                   (newline out)
-                   (display-sigma (+ n 1)))
-            (void)))
-(display-sigma)
-(newline out)
-(pretty-print 12)
+(printf "sigma ~a ~a~n" (length A) (length V))
+(for ([n (in-range 0 (length V))])
+  (printf "~a ~a~n" (+ n (length X)) n))
+(newline)
 
 
-;; Write table Fun
-(display "Fun " out)
-(display lenS out)
-(display " " out)
-(display lenA out)
-(newline out)
-(define (display-Fun cS remS)
-        (when (not (null? remS))
-              (define l (car remS))
-              (define e (hash-ref saved l))
-              (when (and (list? e) (equal? (first e) 'set!/k))
-                    (define aek (last e))
-                    (define aoff (ae->A aek))
-                    (display cS out)
-                    (display " " out)
-                    (display aoff out)
-                    (newline out))
-              (when (and (list? e) (equal? (first e) 'prim))
-                    (define aek (last e))
-                    (define aoff (ae->A aek))
-                    (display cS out)
-                    (display " " out)
-                    (display aoff out)
-                    (newline out))
-              (when (not (or (not (list? e))
-                             (member (first e) '(prim set!/k if lambda halt))))
-                    (define aef (first e))
-                    (define aoff (ae->A aef))
-                    (display cS out)
-                    (display " " out)
-                    (display aoff out)
-                    (newline out))
-              (display-Fun (+ 1 cS) (cdr remS))))
-(display-Fun 0 S)
-(newline out)
-(pretty-print 11)
+(printf "Fun ~a ~a~n" (length S) (length A))
+(for ([e S]
+      [n (in-naturals)])
+  (match e
+    [(set!/k-exp _ _ _ k)
+     (printf "~a ~a~n" n (exp->addr k))]
+    [(prim-exp _ _ _ k)
+     (printf "~a ~a~n" n (exp->addr k))]
+    [(call-exp _ fun _)
+     (printf "~a ~a~n" n (exp->addr fun))]
+    [else (void)]))
+(newline)
 
 
-;; Write table CondTrue
-(display "CondTrue " out)
-(display lenS out)
-(display " " out)
-(display lenS out)
-(newline out)
-(define (display-CondTrue cS remS)
-        (when (not (null? remS))
-              (define l (car remS))
-              (define e (hash-ref saved l))
-              (when (and (list? e) (equal? (first e) 'if))
-                    (define aet (third e))
-                    (define soff (find-state aet))
-                    (display cS out)
-                    (display " " out)
-                    (display soff out)
-                    (newline out))
-              (display-CondTrue (+ 1 cS) (cdr remS))))
-(display-CondTrue 0 S)
-(newline out)
-(pretty-print 10)
+(printf "CondTrue ~a ~a~n" (length S) (length S))
+(for ([e S])
+  (match e
+    [(if-exp _ _ true _)
+     (printf "~a ~a~n" (exp->state e) (exp->state true))]
+    [else (void)]))
+(newline)
 
 
-;; Write table CondFalse
-(display "CondFalse " out)
-(display lenS out)
-(display " " out)
-(display lenS out)
-(newline out)
-(define (display-CondFalse cS remS)
-        (when (not (null? remS))
-              (define l (car remS))
-              (define e (hash-ref saved l))
-              (when (and (list? e) (equal? (first e) 'if))
-                    (define aef (fourth e))
-                    (define soff (find-state aef))
-                    (display cS out)
-                    (display " " out)
-                    (display soff out)
-                    (newline out))
-              (display-CondFalse (+ 1 cS) (cdr remS))))
-(display-CondFalse 0 S)
-(newline out)
-(pretty-print 9)
+(printf "CondFalse ~a ~a~n" (length S) (length S))
+(for ([e S])
+  (match e
+    [(if-exp _ _ _ false)
+     (printf "~a ~a~n" (exp->state e) (exp->state false))]
+    [else (void)]))
+(newline)
 
 
-;; Write table Body
-(display "Body " out)
-(display lenV out)
-(display " " out) 
-(display lenS out)
-(newline out)
-(define (display-Body cV remV)
-        (when (not (null? remV))
-              (define l (car remV))
-              (when (hash-has-key? saved l)
-                    (define e (hash-ref saved l))
-                    (when (and (list? e) (equal? (first e) 'lambda))
-                          (define bodyl (third e))
-                          (define soff (find-state bodyl))
-                          (display cV out)
-                          (display " " out)
-                          (display soff out)
-                          (newline out)))
-              (display-Body (+ 1 cV) (cdr remV))))
-(display-Body 0 V)
-(newline out)
-(pretty-print 7)
+(printf "Body ~a ~a~n" (length V) (length S))
+(for ([v V]
+      [n (in-naturals)]
+      #:when (labeled-value? v))
+  (match (label->exp v)
+    [(lambda-exp label params body)
+     (printf "~a ~a~n" n (exp->state body))]
+    [else (void)]))
+(newline)
 
 
-;; Write tables Arg_i
-(define (write-argi i)
-        (display "Arg" out)
-        (display i out)
-        (display " " out)
-        (display lenS out)
-        (display " " out)
-        (display lenA out)
-        (newline out)
-        (define (display-Arg cS remS)
-                (when (not (null? remS))
-                      (define l (car remS))
-                      (define e (hash-ref saved l))
-                      (when (and (list? e) (equal? (first e) 'set!/k) (< i 3))
-                            (define ae (list-ref e i))
-                            (define aoff (ae->A ae))
-                            (display cS out)
-                            (display " " out)
-                            (display aoff out)
-                            (newline out))
-                      (when (and (list? e) (equal? (first e) 'prim) (member (second e) primlistops) (<= i (- (length e) 3)))
-                            (define ae (list-ref e (+ 1 i)))
-                            (define aoff (ae->A ae))
-                            (display cS out)
-                            (display " " out)
-                            (display aoff out)
-                            (newline out))
-                      (when (and (list? e) (equal? (first e) 'if) (= i 1))
-                            (define ae (list-ref e i))
-                            (define aoff (ae->A ae))
-                            (display cS out)
-                            (display " " out)
-                            (display aoff out)
-                            (newline out))
-                      (when (and (not (or (not (list? e))
-                                          (member (first e) '(prim set!/k if lambda halt))))
-                                 (< i (length e)))
-                             (define aei (list-ref e i))
-                             (define aoff (ae->A aei))
-                             (display cS out)
-                             (display " " out)
-                             (display aoff out)
-                             (newline out))
-                      (display-Arg (+ 1 cS) (cdr remS))))
-        (display-Arg 0 S)
-        (newline out))
-(forupto write-argi (max ARGSN 2))
-(pretty-print 6)
+(for ([i (in-range arg-size 0 -1)])
+  (printf "Arg~a ~a ~a~n" i (length S) (length A))
+  (for ([s S]
+        [n (in-naturals)])
+    (match s
+      [(set!/k-exp _ id val-exp _)
+       (cond
+         [(= i 1) (printf "~a ~a~n" n (exp->addr id))]
+         [(= i 2) (printf "~a ~a~n" n (exp->addr val-exp))]
+         [else    (void)])]
+      [(prim-exp _ op args _)
+       (when (and (primlistop? op) (<= i (length args)))
+         (printf "~a ~a~n" n (exp->addr (list-ref args (- i 1)))))]
+      [(if-exp _ test _ _)
+       (when (= i 1) 
+         (printf "~a ~a~n" n (exp->addr test)))]
+      [(call-exp _ _ args)
+       (when (<= i (length args))
+         (printf "~a ~a~n" n (exp->addr (list-ref args (- i 1)))))]
+      [else (void)]))
+  (newline))
 
 
-;; Write tables Var_i
-(define (write-vari i)
-        (display "Var" out)
-        (display i out)
-        (display " " out)
-        (display lenV out)
-        (display " " out)
-        (display lenA out)
-        (newline out)
-        (define (display-Var cV remV)
-                (when (not (null? remV))
-                      (define vl (car remV))
-                      (when (hash-has-key? saved vl)
-                           (define e (hash-ref saved vl))
-                           (when (and (list? e) (equal? (first e) 'lambda) (< (- i 1) (length (second e))))
-                                 (define ail (list-ref (second e) (- i 1)))
-                                 (define xoff (- lenX (length (member (hash-ref saved ail) X))))
-                                 (display cV out)
-                                 (display " " out)
-                                 (display xoff out)
-                                 (newline out)))
-                      (display-Var (+ 1 cV) (cdr remV))))
-        (display-Var 0 V)
-        (newline out))
-(forupto write-vari ARGSN)
-(pretty-print 5)
+(for ([i (in-range arg-size 0 -1)])
+  (printf "Var~a ~a ~a~n" i (length V) (length A))
+  (for ([v V]
+        [n (in-naturals)]
+        #:when (labeled-value? v))
+    (match (label->exp v)
+      [(lambda-exp _ params body)
+       (when (<= i (length params))
+         (printf "~a ~a~n" n (exp->addr (list-ref params (- i 1)))))]
+      [else (void)]))
+  (newline))
 
 
-;; Write Tables Call_i
-(define (write-calli i)
-        (display "Call" out)
-        (display (- i 1) out)
-        (display " " out)
-        (display lenS out)
-        (display " 1" out)
-        (newline out)
-        (define (display-Call cS remS)
-                (when (not (null? remS))
-                      (define l (car remS))
-                      (define e (hash-ref saved l))
-                      (when (and (not (or (not (list? e))
-                                          (member (first e) '(prim set!/k if lambda halt))))
-                                 (= (- i 1) (- (length e) 1)))
-                            (display cS out)
-                            (display " 0" out)
-                            (newline out))
-                      (display-Call (+ 1 cS) (cdr remS))))
-        (display-Call 0 S)
-        (newline out))
-(forupto write-calli (+ 1 ARGSN))
-(pretty-print 4)
+(for ([i (in-range arg-size -1 -1)])
+  (printf "Call~a ~a 1~n" i (length S))
+  (for ([s S]
+        [n (in-naturals)])
+    (match s
+      [(call-exp _ _ args)
+       (when (= i (length args))
+         (printf "~a 0~n" n))]
+      [else (void)]))
+  (newline))
 
 
-;; Write table If
-(display "If " out)
-(display lenS out)
-(display " 1" out)
-(newline out)
-(define (display-If cS remS)
-        (when (not (null? remS))
-              (define l (car remS))
-              (define e (hash-ref saved l))
-              (when (and (list? e) (equal? (first e) 'if))
-                    (display cS out)
-                    (display " 0" out)
-                    (newline out))
-              (display-If (+ 1 cS) (cdr remS))))
-(display-If 0 S)
-(newline out)
-(pretty-print 3)
+(printf "If ~a 1~n" (length S))
+(for ([s S]
+      [n (in-naturals)])
+  (when (if-exp? s)
+     (printf "~a 0~n" n)))
+(newline)
 
 
-;; Write table Set
-(display "Set " out)
-(display lenS out)
-(display " 1" out)
-(newline out)
-(define (display-Set cS remS)
-        (when (not (null? remS))
-              (define l (car remS))
-              (define e (hash-ref saved l))
-              (when (and (list? e) (equal? (first e) 'set!/k))
-                    (display cS out)
-                    (display " 0" out)
-                    (newline out))
-              (display-Set (+ 1 cS) (cdr remS))))
-(display-Set 0 S)
-(newline out)
-(pretty-print 2)
+(printf "Set ~a 1~n" (length S))
+(for ([s S]
+      [n (in-naturals)])
+  (when (set!/k-exp? s)
+     (printf "~a 0~n" n)))
+(newline)
 
 
-;; Write table PrimINT
-(display "PrimNum " out)
-(display lenS out)
-(display " 1" out)
-(newline out)
-(define (display-PrimINT cS remS)
-        (when (not (null? remS))
-              (define l (car remS))
-              (define e (hash-ref saved l))
-              (when (and (list? e) (equal? (first e) 'prim) (member (second e) '(+ - * / sqrt expt max min vector-length length exact->inexact fl+ fl- fl/ fl* flsin modulo)))
-                    (display cS out)
-                    (display " 0" out)
-                    (newline out))
-              (display-PrimINT (+ 1 cS) (cdr remS))))
-(display-PrimINT 0 S)
-(newline out)
-(pretty-print 1)
+(printf "PrimNum ~a 1~n" (length S))
+(for ([s S]
+      [n (in-naturals)])
+  (when (and (prim-exp? s) (primnumop? (prim-exp-op s)))
+     (printf "~a 0~n" n)))
+(newline)
 
 
-;; Write table PrimBOOL
-(display "PrimBool " out)
-(display lenS out)
-(display " 1" out)
-(newline out)
-(define (display-PrimBOOL cS remS)
-        (when (not (null? remS))
-              (define l (car remS))
-              (define e (hash-ref saved l))
-              (when (and (list? e) (equal? (first e) 'prim) 
-                         (member (second e) '(< > <= >= = equal? null? not and or fl> fl< list? number? boolean?)))
-                    (display cS out)
-                    (display " 0" out)
-                    (newline out))
-              (display-PrimBOOL (+ 1 cS) (cdr remS))))
-(display-PrimBOOL 0 S)
-(newline out)
-(pretty-print 0)
+(printf "PrimBool ~a 1~n" (length S))
+(for ([s S]
+      [n (in-naturals)])
+  (when (and (prim-exp? s) (primboolop? (prim-exp-op s)))
+     (printf "~a 0~n" n)))
+(newline)
 
 
-;; Write table PrimVOID
-(display "PrimVoid " out)
-(display lenS out)
-(display " 1" out)
-(newline out)
-(define (display-PrimVoid cS remS)
-        (when (not (null? remS))
-              (define l (car remS))
-              (define e (hash-ref saved l))
-              (when (and (list? e) (equal? (first e) 'prim) (member (second e) '(void print pretty-print vector-set!)))
-                    (display cS out)
-                    (display " 0" out)
-                    (newline out))
-              (display-PrimVoid (+ 1 cS) (cdr remS))))
-(display-PrimVoid 0 S)
-(newline out)
-(pretty-print 0)
+(printf "PrimVoid ~a 1~n" (length S))
+(for ([s S]
+      [n (in-naturals)])
+  (when (and (prim-exp? s) (primvoidop? (prim-exp-op s)))
+     (printf "~a 0~n" n)))
+(newline)
 
 
-
-;; Write table PrimLIST
-(define (write-primlisti i)
-        (display "PrimList" out)
-        (display (- i 1) out)
-        (display " " out)
-        (display lenS out)
-        (display " 1" out)
-        (newline out)
-        (define (display-PrimList cS remS)
-                (when (not (null? remS))
-                      (define l (car remS))
-                      (define e (hash-ref saved l))
-                      (when (and (list? e) 
-                                 (equal? (first e) 'prim) 
-                                 (member (second e) primlistops)
-                                 (= (- i 1) (- (length e) 3)))
-                            (display cS out)
-                            (display " 0" out)
-                            (newline out))
-                      (display-PrimList (+ 1 cS) (cdr remS))))
-        (display-PrimList 0 S)
-        (newline out))
-(forupto write-primlisti (+ 1 primlistmax))
-(pretty-print 1)
-
-
-
-
+(for ([i (in-range prim-list-max -1 -1)])
+  (printf "PrimList~a ~a 1~n" i (length S))
+  (for ([s S]
+        [n (in-naturals)])
+    (when (and (prim-exp? s) 
+               (primlistop? (prim-exp-op s))
+               (= i (length (prim-exp-args s))))
+       (printf "~a 0~n" n)))
+  (newline))
 
